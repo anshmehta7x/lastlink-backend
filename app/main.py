@@ -74,7 +74,6 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
             }
         else:
 
-            # If it's a new Google user, create an account automatically
             if provider == "google":
                 # Create a new user with email as username initially
                 username = login_data.displayName
@@ -112,7 +111,6 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
                     "user": new_user
                 }
             else:
-                # For email/password users, they need to register first
                 return {
                     "success": False,
                     "message": "User does not exist. Please register first."
@@ -128,6 +126,7 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
     """
     uid = token_data.get("uid")
     email = token_data.get("email")
+    username = user.username
     
     if not uid or not email:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -141,7 +140,8 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
         if existing_user.get('Items') and len(existing_user['Items']) > 0:
             return {
                 "success": False,
-                "message": "User already exists"
+                "message": "User already exists",
+                "firebaseCleanupNeeded": True
             }
         
         # Check if email or username is already in use
@@ -166,12 +166,16 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
                         if item.get('email') == email:
                             return {
                                 "success": False,
-                                "message": "Email already in use"
+                                "message": "Email already in use",
+                                "firebaseCleanupNeeded": True
                             }
                         if item.get('username') == username:
+                            import app.admin as admin
+                            admin.delete_user(uid)
                             return {
                                 "success": False,
-                                "message": "Username already taken"
+                                "message": "Username already in use",
+                                "firebaseCleanupNeeded": True
                             }
     
         # Create new user
@@ -184,10 +188,6 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
             "provider": "email",
             "createdAt": datetime.now().isoformat(),
             "lastLogin": datetime.now().isoformat(),
-            "settings": {
-                "theme": "dark",
-                "notifications": True
-            }
         }
 
         table.put_item(Item=new_user)
@@ -199,7 +199,11 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Registration error: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Registration error: {str(e)}",
+            "firebaseCleanupNeeded": True
+        }
 
 @app.get("/auth/user")
 async def get_user(token_data: dict = Depends(verify_token)):
