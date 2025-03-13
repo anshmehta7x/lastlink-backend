@@ -1,23 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, Request, Body
+from fastapi import FastAPI, Depends, HTTPException, Request, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app.dbconnect import initialize_connection
-from app.verifytoken import verify_token
+from app.verifytoken import verify_token, auth
 from boto3.dynamodb.conditions import Key, Attr
 from datetime import datetime
 import json
+import logging
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-table = initialize_connection()
+# Set up proper logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Define models
 class UserCreate(BaseModel):
@@ -31,6 +24,108 @@ class UserLogin(BaseModel):
     provider: str = None
     displayName: str = None
 
+# Create a service layer for user operations
+class UserService:
+    def __init__(self, table, auth_client):
+        self.table = table
+        self.auth = auth_client
+    
+    async def delete_firebase_user(self, uid):
+        try:
+            logger.info(f"Deleting Firebase user with uid: {uid}")
+            self.auth.delete_user(uid)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete Firebase user {uid}: {str(e)}")
+            return False
+    
+    async def username_exists(self, username):
+        response = self.table.scan(
+            FilterExpression=Attr("username").eq(username)
+        )
+        return response.get('Items') and len(response['Items']) > 0
+    
+    async def email_exists(self, email):
+        response = self.table.scan(
+            FilterExpression=Attr("email").eq(email)
+        )
+        return response.get('Items') and len(response['Items']) > 0
+    
+    async def create_user(self, user_data):
+        return self.table.put_item(Item=user_data)
+    
+    async def get_user_by_uid(self, uid):
+        response = self.table.query(
+            KeyConditionExpression=Key("uid").eq(uid)
+        )
+        return response.get('Items')[0] if response.get('Items') and len(response.get('Items')) > 0 else None
+        
+    async def update_last_login(self, uid):
+        return self.table.update_item(
+            Key={"uid": uid},
+            UpdateExpression="SET lastLogin = :time",
+            ExpressionAttributeValues={
+                ":time": datetime.now().isoformat()
+            }
+        )
+    
+    async def update_user_profile(self, uid, update_data):
+        # Build update expression
+        update_expression = "SET updatedAt = :updated"
+        expression_values = {
+            ":updated": datetime.now().isoformat()
+        }
+        
+        for key, value in update_data.items():
+            if key not in ["uid", "email", "provider", "createdAt"]:  # Prevent updating critical fields
+                update_expression += f", {key} = :{key}"
+                expression_values[f":{key}"] = value
+        
+        # Update user
+        return self.table.update_item(
+            Key={"uid": uid},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_values
+        )
+    
+    async def delete_user(self, uid):
+        return self.table.delete_item(
+            Key={"uid": uid}
+        )
+    
+    async def get_all_users(self):
+        response = self.table.scan()
+        return response.get('Items', [])
+    
+    async def get_modified_username(self, base_username, max_attempts=10):
+        count = 0
+        username = base_username
+        
+        while count < max_attempts:
+            if not await self.username_exists(username):
+                return username
+            count += 1
+            username = f"{base_username}{count}"
+        
+        # If we exhausted attempts, generate a truly unique name with timestamp
+        return f"{base_username}{int(datetime.now().timestamp())}"
+
+# Initialize the app
+app = FastAPI()
+
+# CORS middleware setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize services
+table = initialize_connection()
+user_service = UserService(table, auth)
+
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
@@ -40,7 +135,6 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
     """
     Handle user login from any provider (email/password or Google)
     """
-    print(login_data)
     uid = token_data.get("uid")
     email = token_data.get("email")
     provider = login_data.provider
@@ -50,22 +144,12 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
     
     try:
         # Check if user exists
-        user_response = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        user = await user_service.get_user_by_uid(uid)
         
         # User exists - return user data
-        if user_response.get('Items') and len(user_response['Items']) > 0:
-            user = user_response['Items'][0]
-            
+        if user:
             # Update last login time
-            table.update_item(
-                Key={"uid": uid},
-                UpdateExpression="SET lastLogin = :time",
-                ExpressionAttributeValues={
-                    ":time": datetime.now().isoformat()
-                }
-            )
+            await user_service.update_last_login(uid)
             
             return {
                 "success": True,
@@ -73,37 +157,26 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
                 "user": user
             }
         else:
-
+            # Handle auto-creation for Google login
             if provider == "google":
                 # Create a new user with email as username initially
-                username = login_data.displayName
-                # Check if username exists and modify if needed
-                username_exists = True
-                count = 0
-                base_username = username
+                base_username = login_data.displayName
                 
-                while username_exists and count < 10:
-                    response = table.scan(
-                        FilterExpression=Attr("username").eq(username)
-                    )
-                    
-                    if response.get('Items') and len(response['Items']) > 0:
-                        count += 1
-                        username = f"{base_username}{count}"
-                    else:
-                        username_exists = False
+                # Get unique username
+                username = await user_service.get_modified_username(base_username)
                 
                 # Create new user
                 new_user = {
                     "uid": uid,
                     "email": email,
                     "username": username,
+                    "displayName": login_data.displayName or username,
                     "provider": provider,
                     "createdAt": datetime.now().isoformat(),
                     "lastLogin": datetime.now().isoformat(),
                 }
                 
-                table.put_item(Item=new_user)
+                await user_service.create_user(new_user)
                 
                 return {
                     "success": True,
@@ -117,10 +190,15 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
                 }
                 
     except Exception as e:
+        logger.error(f"Login error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Login error: {str(e)}")
 
 @app.post("/auth/register")
-async def register_user(user: UserCreate, token_data: dict = Depends(verify_token)):
+async def register_user(
+    user: UserCreate, 
+    token_data: dict = Depends(verify_token),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     """
     Register a new user after they've created an account with Firebase Authentication
     """
@@ -133,50 +211,36 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
     
     try:
         # Check if user already exists
-        existing_user = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        existing_user = await user_service.get_user_by_uid(uid)
         
-        if existing_user.get('Items') and len(existing_user['Items']) > 0:
+        if existing_user:
             return {
                 "success": False,
                 "message": "User already exists",
-                "firebaseCleanupNeeded": True
+                "firebaseCleanupNeeded": False  # User exists in both Firebase and database
             }
         
-        # Check if email or username is already in use
-        username = user.username
-        
-        if email or username:
-            filter_expression = None
-            if email and username:
-                filter_expression = Attr("email").eq(email) | Attr("username").eq(username)
-            elif email:
-                filter_expression = Attr("email").eq(email)
-            elif username:
-                filter_expression = Attr("username").eq(username)
-                
-            if filter_expression:
-                response = table.scan(
-                    FilterExpression=filter_expression
-                )
-                
-                if response.get('Items') and len(response['Items']) > 0:
-                    for item in response['Items']:
-                        if item.get('email') == email:
-                            return {
-                                "success": False,
-                                "message": "Email already in use",
-                                "firebaseCleanupNeeded": True
-                            }
-                        if item.get('username') == username:
-                            import app.admin as admin
-                            admin.delete_user(uid)
-                            return {
-                                "success": False,
-                                "message": "Username already in use",
-                                "firebaseCleanupNeeded": True
-                            }
+        # Check if email is already in use
+        if await user_service.email_exists(email):
+            # Schedule Firebase cleanup in background
+            background_tasks.add_task(user_service.delete_firebase_user, uid)
+            
+            return {
+                "success": False,
+                "message": "Email already in use",
+                "firebaseCleanupNeeded": False  # Will be handled in background
+            }
+            
+        # Check if username is already in use
+        if await user_service.username_exists(username):
+            # Schedule Firebase cleanup in background
+            background_tasks.add_task(user_service.delete_firebase_user, uid)
+            
+            return {
+                "success": False,
+                "message": "Username already in use",
+                "firebaseCleanupNeeded": False  # Will be handled in background
+            }
     
         # Create new user
         new_user = {
@@ -190,7 +254,7 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
             "lastLogin": datetime.now().isoformat(),
         }
 
-        table.put_item(Item=new_user)
+        await user_service.create_user(new_user)
         
         return {
             "success": True,
@@ -199,10 +263,15 @@ async def register_user(user: UserCreate, token_data: dict = Depends(verify_toke
         }
         
     except Exception as e:
+        logger.error(f"Registration error: {str(e)}")
+        
+        # Attempt Firebase cleanup on any error
+        background_tasks.add_task(user_service.delete_firebase_user, uid)
+            
         return {
             "success": False,
             "message": f"Registration error: {str(e)}",
-            "firebaseCleanupNeeded": True
+            "firebaseCleanupNeeded": False  # Will be handled in background
         }
 
 @app.get("/auth/user")
@@ -216,14 +285,12 @@ async def get_user(token_data: dict = Depends(verify_token)):
         raise HTTPException(status_code=401, detail="Invalid token")
     
     try:
-        user_response = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        user = await user_service.get_user_by_uid(uid)
         
-        if user_response.get('Items') and len(user_response['Items']) > 0:
+        if user:
             return {
                 "success": True,
-                "user": user_response['Items'][0]
+                "user": user
             }
         else:
             return {
@@ -231,6 +298,7 @@ async def get_user(token_data: dict = Depends(verify_token)):
                 "message": "User not found"
             }
     except Exception as e:
+        logger.error(f"Error retrieving user: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error retrieving user: {str(e)}")
 
 @app.put("/auth/update")
@@ -245,62 +313,43 @@ async def update_user(user_data: dict = Body(...), token_data: dict = Depends(ve
     
     try:
         # Check if user exists
-        user_response = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        user = await user_service.get_user_by_uid(uid)
         
-        if not user_response.get('Items') or len(user_response['Items']) == 0:
+        if not user:
             return {
                 "success": False,
                 "message": "User not found"
             }
         
         # Check if updating username and if it's already taken
-        if "username" in user_data and user_data["username"] != user_response['Items'][0].get("username", ""):
-            username_response = table.scan(
-                FilterExpression=Attr("username").eq(user_data["username"])
-            )
-            
-            if username_response.get('Items') and len(username_response['Items']) > 0:
+        if "username" in user_data and user_data["username"] != user.get("username", ""):
+            if await user_service.username_exists(user_data["username"]):
                 return {
                     "success": False,
                     "message": "Username already taken"
                 }
         
-        # Build update expression
-        update_expression = "SET updatedAt = :updated"
-        expression_values = {
-            ":updated": datetime.now().isoformat()
-        }
-        
-        for key, value in user_data.items():
-            if key not in ["uid", "email", "provider", "createdAt"]:  # Prevent updating critical fields
-                update_expression += f", {key} = :{key}"
-                expression_values[f":{key}"] = value
-        
         # Update user
-        table.update_item(
-            Key={"uid": uid},
-            UpdateExpression=update_expression,
-            ExpressionAttributeValues=expression_values
-        )
+        await user_service.update_user_profile(uid, user_data)
         
         # Get updated user
-        updated_user = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        updated_user = await user_service.get_user_by_uid(uid)
         
         return {
             "success": True,
             "message": "Profile updated successfully",
-            "user": updated_user['Items'][0] if updated_user.get('Items') else None
+            "user": updated_user
         }
     
     except Exception as e:
+        logger.error(f"Error updating profile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating profile: {str(e)}")
 
 @app.delete("/auth/delete")
-async def delete_user(token_data: dict = Depends(verify_token)):
+async def delete_user_account(
+    token_data: dict = Depends(verify_token),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     """
     Delete a user account
     """
@@ -311,20 +360,19 @@ async def delete_user(token_data: dict = Depends(verify_token)):
     
     try:
         # Check if user exists
-        user_response = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        user = await user_service.get_user_by_uid(uid)
         
-        if not user_response.get('Items') or len(user_response['Items']) == 0:
+        if not user:
             return {
                 "success": False,
                 "message": "User not found"
             }
         
-        # Delete user
-        table.delete_item(
-            Key={"uid": uid}
-        )
+        # Delete user from database
+        await user_service.delete_user(uid)
+        
+        # Schedule Firebase deletion as background task
+        background_tasks.add_task(user_service.delete_firebase_user, uid)
         
         return {
             "success": True,
@@ -332,6 +380,7 @@ async def delete_user(token_data: dict = Depends(verify_token)):
         }
     
     except Exception as e:
+        logger.error(f"Error deleting account: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting account: {str(e)}")
 
 @app.post("/auth/check-username")
@@ -345,11 +394,9 @@ async def check_username(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Username is required")
     
     try:
-        response = table.scan(
-            FilterExpression=Attr("username").eq(username)
-        )
+        is_taken = await user_service.username_exists(username)
         
-        if response.get('Items') and len(response['Items']) > 0:
+        if is_taken:
             return {
                 "available": False,
                 "message": "Username is already taken"
@@ -361,6 +408,7 @@ async def check_username(data: dict = Body(...)):
             }
     
     except Exception as e:
+        logger.error(f"Error checking username: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error checking username: {str(e)}")
 
 @app.get("/users")
@@ -372,24 +420,23 @@ async def get_users(token_data: dict = Depends(verify_token)):
     
     # Check if admin (in a real app, you'd have an admin flag in the user record)
     try:
-        user_response = table.query(
-            KeyConditionExpression=Key("uid").eq(uid)
-        )
+        user = await user_service.get_user_by_uid(uid)
         
-        if not user_response.get('Items') or len(user_response['Items']) == 0:
+        if not user:
             raise HTTPException(status_code=401, detail="Unauthorized")
         
         # Here you would check if user is admin
-        # if not user_response['Items'][0].get("isAdmin", False):
+        # if not user.get("isAdmin", False):
         #     raise HTTPException(status_code=403, detail="Forbidden")
         
-        users = table.scan()
+        users = await user_service.get_all_users()
         return {
             "success": True,
-            "users": users["Items"]
+            "users": users
         }
     
     except HTTPException as e:
         raise e
     except Exception as e:
+        logger.error(f"Error retrieving users: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error retrieving users: {str(e)}")

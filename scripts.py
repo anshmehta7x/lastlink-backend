@@ -43,7 +43,7 @@ def show_firebase():
         print("No users found in Firebase.")
     else:
         for user in users:
-            print(user.uid)
+            print(user, user.uid)
 
 
 def show_db_and_firebase():
@@ -56,5 +56,15 @@ def clear_db_and_firebase():
     clear_firebase()
     clear_table()
 
-# clear_db_and_firebase()
-show_db_and_firebase()
+if __name__ == "__main__":
+    z = input("Do you want to clear the database and Firebase? (y/n): ")
+    if z.lower() == 'y':
+        clear_db_and_firebase()
+    else:
+        print("No action taken.")
+    z = input("Do you want to show the database and Firebase? (y/n): ")
+    if z.lower() == 'y':
+        show_db_and_firebase()
+    else:
+        print("No action taken.")
+
