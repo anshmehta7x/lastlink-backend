@@ -41,6 +41,12 @@ class UserService:
             KeyConditionExpression=Key("uid").eq(uid)
         )
         return response.get('Items')[0] if response.get('Items') and len(response.get('Items')) > 0 else None
+
+    async def get_user_by_username(self, username):
+        response = self.table.scan(
+            FilterExpression=Attr("username").eq(username)
+        )
+        return response.get('Items')[0] if response.get('Items') and len(response.get('Items')) > 0 else None
         
     async def update_last_login(self, uid):
         return self.table.update_item(

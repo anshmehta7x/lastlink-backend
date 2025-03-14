@@ -13,7 +13,6 @@ router = APIRouter()
 
 @router.post("/login")
 async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depends(verify_token)):
-
     uid = token_data.get("uid")
     email = token_data.get("email")
     provider = login_data.provider
@@ -36,15 +35,15 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
                 base_username = login_data.displayName
                 username = await user_service.get_modified_username(base_username)
                 
-                # Create new user
                 new_user = {
                     "uid": uid,
                     "email": email,
                     "username": username.replace(" ", "").lower(),
-                    "displayName": login_data.displayName or username,
+                    "name": login_data.displayName or username,
                     "provider": provider,
                     "createdAt": datetime.now().isoformat(),
                     "lastLogin": datetime.now().isoformat(),
+                    "photoURL": "https://www.tenforums.com/geek/gars/images/2/types/thumb_15951118880user.png",
                 }
                 
                 await user_service.create_user(new_user)
@@ -105,7 +104,8 @@ async def register_user(
             "uid": uid,
             "email": email,
             "username": username.replace(" ", "").lower(),
-            "photoURL": user.photoURL or "",
+            "name": "",
+            "photoURL": user.photoURL or "https://www.tenforums.com/geek/gars/images/2/types/thumb_15951118880user.png",
             "provider": "email",
             "createdAt": datetime.now().isoformat(),
             "lastLogin": datetime.now().isoformat(),
