@@ -44,6 +44,7 @@ async def login_user(login_data: UserLogin = Body(...), token_data: dict = Depen
                     "createdAt": datetime.now().isoformat(),
                     "lastLogin": datetime.now().isoformat(),
                     "photoURL": "https://www.tenforums.com/geek/gars/images/2/types/thumb_15951118880user.png",
+                    "profileViews": 0
                 }
                 
                 await user_service.create_user(new_user)
@@ -109,6 +110,7 @@ async def register_user(
             "provider": "email",
             "createdAt": datetime.now().isoformat(),
             "lastLogin": datetime.now().isoformat(),
+            "profileViews": 0
         }
 
         await user_service.create_user(new_user)
