@@ -53,3 +53,39 @@ export const createUser = async (userData: reqUserInfo) => {
 
     return data;
 };
+
+export const getUserByUsername = async (userName: string) => {
+    const { data, error } = await supabase
+        .from("users")
+        .select("id, email, username")
+        .eq("username", userName.trim().toLowerCase())
+        .single();
+    if (data === null) {
+        throw new Error("Username not found");
+    }
+
+    if (error) {
+        throw new Error("Error fetching user");
+    }
+
+    return data;
+};
+
+export const removeUser = async (id: number) => {
+    const { data, error } = await supabase
+        .from("users")
+        .delete()
+        .eq("id", id)
+        .select("id, email, username")
+        .single();
+
+    if (error) {
+        throw new Error("Error removing user");
+    }
+
+    if (!data) {
+        throw new Error("User not found");
+    }
+
+    return data;
+};
