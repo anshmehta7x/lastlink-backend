@@ -2,6 +2,8 @@ import express, { Application, Request, Response } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 
+import userrouter from "./user/user.routes";
+
 const express_app: Application = express();
 dotenv.config();
 
@@ -14,5 +16,6 @@ const health_check = (request: Request, response: Response) => {
 };
 
 express_app.get("/api/health_check", health_check);
+express_app.use("/api/user/", userrouter);
 
 export default express_app;
