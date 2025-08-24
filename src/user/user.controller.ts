@@ -7,22 +7,23 @@ import {
     removeUser,
 } from "./user.service";
 
-import { validateEmail, validateUsername } from "./validate";
+import { validateEmail, validateUsername } from "./user.validate";
 
 export async function checkEmail(req: Request, res: Response): Promise<void> {
     try {
-        if (req.body.email === null || !validateEmail(req.body.email)) {
-            res.status(400).json({ message: "Bad Request" });
+        const email = req.body.email?.trim().toLowerCase();
+        if (!email || !validateEmail(email)) {
+            res.status(400).json({ error: "Bad Request" });
         } else {
-            const available = await checkEmailAvailable(req.body.email);
+            const available = await checkEmailAvailable(email);
             if (available) {
                 res.status(200).json({ message: "Email available" });
             } else {
-                res.status(409).json({ message: "Email unavailable" });
+                res.status(409).json({ error: "Email unavailable" });
             }
         }
     } catch (error: any) {
-        res.status(500).json({ error: "Unable to check Email availablity" });
+        res.status(500).json({ error: "Unable to check Email availability" });
     }
 }
 
@@ -31,22 +32,22 @@ export async function checkUserName(
     res: Response,
 ): Promise<void> {
     try {
-        if (
-            req.body.username === null ||
-            !validateUsername(req.body.username)
-        ) {
-            res.status(400).json({ message: "Bad Request" });
+        const username = req.body.username?.trim().toLowerCase();
+        if (!username || !validateUsername(username)) {
+            res.status(400).json({ error: "Bad Request" });
         } else {
-            const available = await checkUserNameAvailable(req.body.username);
+            const available = await checkUserNameAvailable(username);
             if (available) {
                 res.status(200).json({ message: "Username available" });
             } else {
-                res.status(409).json({ message: "Username unavailable" });
+                res.status(409).json({ error: "Username unavailable" });
             }
         }
     } catch (error: any) {
         console.error(error);
-        res.status(500).json({ error: "Unable to check Username availablity" });
+        res.status(500).json({
+            error: "Unable to check Username availability",
+        });
     }
 }
 
@@ -55,20 +56,23 @@ export async function createUserController(
     res: Response,
 ): Promise<void> {
     try {
-        if (!req.body || !req.body.email || !req.body.username) {
+        const email = req.body.email?.trim().toLowerCase();
+        const username = req.body.username?.trim().toLowerCase();
+
+        if (!email || !username) {
             res.status(400).json({ error: "Missing values" });
             return;
-        } else if (!validateEmail(req.body.email)) {
+        } else if (!validateEmail(email)) {
             res.status(400).json({ error: "Wrong email" });
-        } else if (!validateUsername(req.body.username)) {
+        } else if (!validateUsername(username)) {
             res.status(400).json({ error: "Wrong username" });
         } else {
             const newUser = await createUser({
-                email: req.body.email,
-                username: req.body.username,
+                email: email,
+                username: username,
             });
-            console.log("creAted user : ", newUser);
-            res.status(201).json({ message: "Account creAted" });
+            console.log("created user : ", newUser);
+            res.status(201).json({ message: "Account created" });
         }
     } catch (error: any) {
         if (error.message === "Email taken") {
@@ -88,7 +92,7 @@ export async function getUserController(
     res: Response,
 ): Promise<void> {
     try {
-        const { username } = req.params;
+        const username = req.params.username?.trim().toLowerCase();
 
         if (!username || !validateUsername(username)) {
             res.status(400).json({ error: "Bad Request" });
@@ -106,8 +110,9 @@ export async function getUserController(
         console.error(error);
         if (error.message === "Username not found") {
             res.status(404).json({ error: error.message });
+        } else {
+            res.status(500).json({ error: "Unable to fetch user" });
         }
-        res.status(500).json({ error: "Unable to fetch user" });
     }
 }
 
